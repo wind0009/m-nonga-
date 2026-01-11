@@ -1,128 +1,159 @@
 
 import { User, Match, Message, Gender } from '../types';
 import { MOCK_USERS } from '../constants';
-
-// Simulating a database in localStorage
-const DB_KEYS = {
-  USERS: 'mnonga_db_users',
-  MATCHES: 'mnonga_db_matches',
-  MESSAGES: 'mnonga_db_messages',
-  SWIPES: 'mnonga_db_swipes', // { fromId: { toId: 'like' | 'pass' } }
-};
-
-const delay = (ms: number) => new Promise(res => setTimeout(res, ms));
-
-const storage = {
-  get: <T>(key: string, defaultValue: T): T => {
-    const data = localStorage.getItem(key);
-    return data ? JSON.parse(data) : defaultValue;
-  },
-  set: (key: string, value: any) => {
-    localStorage.setItem(key, JSON.stringify(value));
-  }
-};
+import { supabase } from './supabaseClient';
 
 export const api = {
-  // --- AUTH ---
-  async login(phone: string): Promise<User> {
-    await delay(1000);
-    const users = storage.get<User[]>(DB_KEYS.USERS, []);
-    let user = users.find(u => u.id === `user_${phone}`);
-    
-    if (!user) {
-      user = {
-        id: `user_${phone}`,
-        name: 'Nouveau Membre',
-        age: 25,
-        city: 'Ouagadougou',
-        district: 'Centre',
-        occupation: 'Membre M\'nonga',
-        bio: 'Je viens de rejoindre M\'nonga !',
-        interests: ['Rencontres', 'Culture'],
-        photos: ['https://picsum.photos/id/1012/600/800'],
-        gender: Gender.OTHER
-      };
-      users.push(user);
-      storage.set(DB_KEYS.USERS, users);
-    }
-    return user;
-  },
-
-  // --- DISCOVERY ---
-  async getDiscoverableUsers(currentUserId: string): Promise<User[]> {
-    await delay(800);
-    const swipes = storage.get<Record<string, Record<string, string>>>(DB_KEYS.SWIPES, {});
-    const userSwipes = swipes[currentUserId] || {};
-    
-    // Return mock users + DB users that haven't been swiped yet
-    const allUsers = [...MOCK_USERS]; 
-    return allUsers.filter(u => u.id !== currentUserId && !userSwipes[u.id]);
-  },
-
-  // --- SWIPING & MATCHING ---
-  async swipe(fromId: string, toId: string, direction: 'like' | 'pass'): Promise<Match | null> {
-    await delay(200);
-    const swipes = storage.get<Record<string, Record<string, string>>>(DB_KEYS.SWIPES, {});
-    
-    if (!swipes[fromId]) swipes[fromId] = {};
-    swipes[fromId][toId] = direction;
-    storage.set(DB_KEYS.SWIPES, swipes);
-
-    if (direction === 'like') {
-      // Check for mutual like
-      const targetSwipes = swipes[toId] || {};
-      if (targetSwipes[fromId] === 'like' || toId.length < 5) { // Simulating auto-like from mock users
-        const matches = storage.get<Match[]>(DB_KEYS.MATCHES, []);
-        const matchId = `match_${Date.now()}`;
-        const newMatch: Match = {
-          id: matchId,
-          userId: toId,
-          timestamp: Date.now()
-        };
-        matches.push(newMatch);
-        storage.set(DB_KEYS.MATCHES, matches);
-        return newMatch;
+  // Vérifie si un utilisateur existe
+  async getUser(phone: string): Promise<User | null> {
+    const userId = `user_${phone}`;
+    try {
+      const { data, error } = await supabase
+        .from('profiles')
+        .select('*')
+        .eq('id', userId)
+        .maybeSingle();
+      
+      if (error) {
+        console.error("Détails Erreur getUser:", JSON.stringify(error, null, 2));
+        throw error;
       }
+      return data as User | null;
+    } catch (e: any) {
+      console.error("Erreur getUser (lisible):", e.message || JSON.stringify(e));
+      return null;
     }
+  },
+
+  // Crée ou met à jour un profil complet
+  async saveProfile(user: User): Promise<void> {
+    try {
+      const profileData = {
+        id: user.id,
+        name: user.name,
+        age: user.age,
+        city: user.city,
+        district: user.district,
+        occupation: user.occupation,
+        bio: user.bio,
+        interests: user.interests,
+        photos: user.photos,
+        gender: user.gender
+      };
+
+      const { error } = await supabase
+        .from('profiles')
+        .upsert(profileData, { onConflict: 'id' });
+      
+      if (error) {
+        console.error("Erreur de Schéma Supabase détectée !");
+        console.error("Message:", error.message);
+        
+        if (error.code === 'PGRST204' || error.message.includes('column')) {
+          console.group("🆘 BESOIN DE CORRECTION SQL");
+          console.log("Exécutez ceci dans votre SQL Editor Supabase :");
+          console.log(`ALTER TABLE profiles ADD COLUMN IF NOT EXISTS age INTEGER, ADD COLUMN IF NOT EXISTS city TEXT, ADD COLUMN IF NOT EXISTS district TEXT, ADD COLUMN IF NOT EXISTS occupation TEXT, ADD COLUMN IF NOT EXISTS bio TEXT, ADD COLUMN IF NOT EXISTS gender TEXT, ADD COLUMN IF NOT EXISTS interests TEXT[] DEFAULT '{}', ADD COLUMN IF NOT EXISTS photos TEXT[] DEFAULT '{}';`);
+          console.groupEnd();
+        }
+        throw error;
+      }
+    } catch (e: any) {
+      console.error("Erreur critique saveProfile:", e.message || JSON.stringify(e));
+      throw e;
+    }
+  },
+
+  async login(phone: string): Promise<User> {
+    const existing = await this.getUser(phone);
+    if (existing) return existing;
+    
+    const userId = `user_${phone}`;
+    const newUser: User = {
+      id: userId,
+      name: `Membre ${phone.slice(-4)}`,
+      age: 18,
+      city: 'Ouagadougou',
+      district: 'Centre',
+      occupation: 'Nouveau',
+      bio: 'Salut !',
+      interests: [],
+      photos: [`https://picsum.photos/id/${Math.floor(Math.random()*100)}/600/800`],
+      gender: Gender.OTHER
+    };
+    await this.saveProfile(newUser);
+    return newUser;
+  },
+
+  async getDiscoverableUsers(currentUserId: string): Promise<User[]> {
+    try {
+      const { data: swipes, error: swipeError } = await supabase
+        .from('swipes')
+        .select('to_id')
+        .eq('from_id', currentUserId);
+      
+      if (swipeError) console.warn("Erreur swipes:", swipeError.message);
+      
+      const swipedIds = swipes?.map(s => s.to_id) || [];
+      
+      let query = supabase.from('profiles').select('*').neq('id', currentUserId);
+      
+      if (swipedIds.length > 0) {
+        query = query.not('id', 'in', `(${swipedIds.join(',')})`);
+      }
+
+      const { data: profiles, error: profileError } = await query.limit(20);
+      
+      if (profileError || !profiles || profiles.length === 0) {
+        return MOCK_USERS.filter(u => u.id !== currentUserId && !swipedIds.includes(u.id));
+      }
+
+      return profiles as User[];
+    } catch (e: any) {
+      return MOCK_USERS;
+    }
+  },
+
+  async swipe(fromId: string, toId: string, direction: 'like' | 'pass'): Promise<Match | null> {
+    try {
+      await supabase.from('swipes').insert([{ from_id: fromId, to_id: toId, direction }]);
+      if (direction === 'like') {
+        const { data: counter } = await supabase.from('swipes').select('*').eq('from_id', toId).eq('to_id', fromId).eq('direction', 'like').maybeSingle();
+        if (counter) {
+          const { data: match, error: matchError } = await supabase.from('matches').insert([{ user1_id: fromId, user2_id: toId }]).select().single();
+          if (match) return { id: match.id, userId: toId, timestamp: Date.parse(match.created_at) };
+        }
+      }
+    } catch (e: any) {}
     return null;
   },
 
-  // --- MESSAGES ---
   async getMatches(currentUserId: string): Promise<Match[]> {
-    await delay(500);
-    return storage.get<Match[]>(DB_KEYS.MATCHES, []);
+    try {
+      const { data, error } = await supabase.from('matches').select('*').or(`user1_id.eq.${currentUserId},user2_id.eq.${currentUserId}`);
+      if (error) return [];
+      return data.map(m => ({
+        id: m.id,
+        userId: m.user1_id === currentUserId ? m.user2_id : m.user1_id,
+        timestamp: Date.parse(m.created_at)
+      }));
+    } catch (e: any) {
+      return [];
+    }
   },
 
   async getMessages(matchId: string): Promise<Message[]> {
-    const allMessages = storage.get<Record<string, Message[]>>(DB_KEYS.MESSAGES, {});
-    return allMessages[matchId] || [];
+    try {
+      const { data, error } = await supabase.from('messages').select('*').eq('match_id', matchId).order('created_at', { ascending: true });
+      if (error) return [];
+      return data.map(msg => ({ id: msg.id, senderId: msg.sender_id, text: msg.text, timestamp: Date.parse(msg.created_at) }));
+    } catch (e: any) {
+      return [];
+    }
   },
 
   async sendMessage(matchId: string, senderId: string, text: string): Promise<Message> {
-    await delay(100);
-    const allMessages = storage.get<Record<string, Message[]>>(DB_KEYS.MESSAGES, {});
-    const newMessage: Message = {
-      id: `msg_${Date.now()}`,
-      senderId,
-      text,
-      timestamp: Date.now()
-    };
-    
-    if (!allMessages[matchId]) allMessages[matchId] = [];
-    allMessages[matchId].push(newMessage);
-    storage.set(DB_KEYS.MESSAGES, allMessages);
-    return newMessage;
-  },
-
-  async updateProfile(user: User): Promise<void> {
-    await delay(500);
-    const users = storage.get<User[]>(DB_KEYS.USERS, []);
-    const index = users.findIndex(u => u.id === user.id);
-    if (index !== -1) {
-      users[index] = user;
-    } else {
-      users.push(user);
-    }
-    storage.set(DB_KEYS.USERS, users);
+    const { data, error } = await supabase.from('messages').insert([{ match_id: matchId, sender_id: senderId, text: text }]).select().single();
+    if (error) throw error;
+    return { id: data.id, senderId: data.sender_id, text: data.text, timestamp: Date.parse(data.created_at) };
   }
 };
