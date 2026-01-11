@@ -1,0 +1,8 @@
+{
+  "name": "M'nonga",
+  "description": "Une application de rencontre moderne et élégante, conçue spécifiquement pour le Burkina Faso. Rencontrez des Burkinabè authentiques avec une touche de culture locale.",
+  "requestFramePermissions": [
+    "camera",
+    "geolocation"
+  ]
+}
